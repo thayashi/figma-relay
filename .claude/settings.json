@@ -1,8 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(curl * http://localhost:3056/*)",
-      "Bash(curl * localhost:3056/*)"
+      "Bash(curl*localhost:3056*)",
+      "Bash(curl*http://localhost:3056*)"
     ]
   }
 }
