@@ -10,6 +10,7 @@
  *   POST /join-channel  — set the active Figma file by fileKey
  *   POST /command       — send a WebSocket command to the plugin
  *   POST /execute       — execute arbitrary Plugin API code (wraps figma_execute)
+ *   POST /screenshot    — capture screenshot, save to temp file for viewing
  *
  * Usage:
  *   npx tsx src/http-bridge.ts
@@ -30,9 +31,13 @@ import { createChildLogger } from "./core/logger.js";
 
 const logger = createChildLogger({ component: "http-bridge" });
 
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
 const DEFAULT_HTTP_PORT = 3056;
 const MAX_EXECUTE_TIMEOUT = 30000;
-const MAX_BODY_SIZE = 1024 * 1024; // 1 MB
+const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB (screenshots can be large)
 
 // ---------------------------------------------------------------------------
 // Globals set during startup
@@ -166,6 +171,60 @@ async function handleCommand(req: IncomingMessage, res: ServerResponse): Promise
 	}
 }
 
+async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Promise<void> {
+	const body = await parseBody(req);
+	const { nodeId = "", format = "PNG", scale = 2, save } = body;
+
+	const server = requireWsServer(res);
+	if (!server) return;
+
+	const connector = new WebSocketConnector(server);
+
+	try {
+		const result = await connector.captureScreenshot(nodeId, { format, scale });
+
+		if (!result?.success || !result?.image?.base64) {
+			json(res, 502, { success: false, error: "Screenshot capture failed", result });
+			return;
+		}
+
+		const base64 = result.image.base64;
+
+		// If save requested or default, write to temp file for viewing
+		if (save !== false) {
+			const dir = join(tmpdir(), "figma-screenshots");
+			mkdirSync(dir, { recursive: true });
+			const ext = format.toLowerCase() === "jpg" ? "jpg" : "png";
+			const filename = `figma-${Date.now()}.${ext}`;
+			const filepath = join(dir, filename);
+			writeFileSync(filepath, Buffer.from(base64, "base64"));
+
+			json(res, 200, {
+				success: true,
+				filepath,
+				format,
+				scale,
+				byteLength: result.image.byteLength,
+				node: result.image.node,
+			});
+			return;
+		}
+
+		// Return raw base64 if save=false
+		json(res, 200, {
+			success: true,
+			base64,
+			format,
+			scale,
+			byteLength: result.image.byteLength,
+			node: result.image.node,
+		});
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		json(res, 502, { success: false, error: message });
+	}
+}
+
 async function handleExecute(req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const body = await parseBody(req);
 	const { code, timeout = 5000 } = body;
@@ -212,6 +271,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 			await handleCommand(req, res);
 		} else if (req.url === "/execute" && req.method === "POST") {
 			await handleExecute(req, res);
+		} else if (req.url === "/screenshot" && req.method === "POST") {
+			await handleScreenshot(req, res);
 		} else {
 			json(res, 404, {
 				error: "Not found",
@@ -220,6 +281,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 					"POST /join-channel": "Set active Figma file",
 					"POST /command": "Send WebSocket command",
 					"POST /execute": "Execute Plugin API code",
+					"POST /screenshot": "Capture screenshot (saves to temp file)",
 				},
 			});
 		}
@@ -301,7 +363,8 @@ async function main(): Promise<void> {
 		console.log(`  GET  http://localhost:${httpPort}/status`);
 		console.log(`  POST http://localhost:${httpPort}/join-channel`);
 		console.log(`  POST http://localhost:${httpPort}/command`);
-		console.log(`  POST http://localhost:${httpPort}/execute\n`);
+		console.log(`  POST http://localhost:${httpPort}/execute`);
+		console.log(`  POST http://localhost:${httpPort}/screenshot\n`);
 	});
 
 	// Graceful shutdown
