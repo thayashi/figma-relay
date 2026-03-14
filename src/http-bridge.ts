@@ -99,6 +99,23 @@ function requireWsServer(res: ServerResponse): FigmaWebSocketServer | null {
 	return wsServer;
 }
 
+/**
+ * Resolve a file target to a fileKey. Accepts fileKey directly or fileName
+ * (case-insensitive substring match). Returns null if no match found.
+ */
+function resolveFileKey(target: string | undefined): string | undefined {
+	if (!target || !wsServer) return undefined;
+
+	// Check if it's already a valid fileKey
+	const files = wsServer.getConnectedFiles();
+	if (files.some((f) => f.fileKey === target)) return target;
+
+	// Try matching by fileName (case-insensitive substring)
+	const lower = target.toLowerCase();
+	const match = files.find((f) => f.fileName.toLowerCase().includes(lower));
+	return match?.fileKey ?? undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Endpoint handlers
 // ---------------------------------------------------------------------------
@@ -116,7 +133,7 @@ function handleStatus(_req: IncomingMessage, res: ServerResponse): void {
 
 async function handleJoinChannel(req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const body = await parseBody(req);
-	const channel = body.channel as string | undefined;
+	const channel = (body.channel || body.fileName) as string | undefined;
 
 	if (!channel) {
 		// List available channels when none specified
@@ -135,7 +152,8 @@ async function handleJoinChannel(req: IncomingMessage, res: ServerResponse): Pro
 	const server = requireWsServer(res);
 	if (!server) return;
 
-	const switched = server.setActiveFile(channel);
+	const resolvedKey = resolveFileKey(channel);
+	const switched = resolvedKey ? server.setActiveFile(resolvedKey) : false;
 	if (!switched) {
 		json(res, 404, {
 			error: `File "${channel}" is not connected. Open the Desktop Bridge plugin in that file.`,
@@ -147,12 +165,12 @@ async function handleJoinChannel(req: IncomingMessage, res: ServerResponse): Pro
 		return;
 	}
 
-	json(res, 200, { success: true, activeChannel: channel });
+	json(res, 200, { success: true, activeChannel: resolvedKey });
 }
 
 async function handleCommand(req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const body = await parseBody(req);
-	const { command, params = {}, timeout = 15000, fileKey } = body;
+	const { command, params = {}, timeout = 15000, fileKey, fileName } = body;
 
 	if (!command || typeof command !== "string") {
 		json(res, 400, { error: "Missing required field: 'command' (string)" });
@@ -162,8 +180,10 @@ async function handleCommand(req: IncomingMessage, res: ServerResponse): Promise
 	const server = requireWsServer(res);
 	if (!server) return;
 
+	const resolvedKey = resolveFileKey(fileKey || fileName);
+
 	try {
-		const result = await server.sendCommand(command, params, timeout, fileKey);
+		const result = await server.sendCommand(command, params, timeout, resolvedKey);
 		json(res, 200, { success: true, result });
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -173,10 +193,13 @@ async function handleCommand(req: IncomingMessage, res: ServerResponse): Promise
 
 async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const body = await parseBody(req);
-	const { nodeId = "", format = "PNG", scale = 2, save } = body;
+	const { nodeId = "", format = "PNG", scale = 2, save, fileKey, fileName } = body;
 
 	const server = requireWsServer(res);
 	if (!server) return;
+
+	const resolvedKey = resolveFileKey(fileKey || fileName);
+	if (resolvedKey) server.setActiveFile(resolvedKey);
 
 	const connector = new WebSocketConnector(server);
 
@@ -227,7 +250,7 @@ async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Prom
 
 async function handleExecute(req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const body = await parseBody(req);
-	const { code, timeout = 5000 } = body;
+	const { code, timeout = 5000, fileKey, fileName } = body;
 
 	if (!code || typeof code !== "string") {
 		json(res, 400, { error: "Missing required field: 'code' (string)" });
@@ -236,6 +259,11 @@ async function handleExecute(req: IncomingMessage, res: ServerResponse): Promise
 
 	const server = requireWsServer(res);
 	if (!server) return;
+
+	const resolvedKey = resolveFileKey(fileKey || fileName);
+
+	// If a specific file is targeted, set it as active before executing
+	if (resolvedKey) server.setActiveFile(resolvedKey);
 
 	const cappedTimeout = Math.min(Number(timeout) || 5000, MAX_EXECUTE_TIMEOUT);
 	const connector = new WebSocketConnector(server);
