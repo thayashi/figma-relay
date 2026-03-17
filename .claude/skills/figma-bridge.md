@@ -155,11 +155,14 @@ curl -s -X POST http://localhost:3056/execute \
   -d '{"code": "const nodes = figma.currentPage.children; return nodes.map(n => ({ id: n.id, name: n.name, type: n.type }))"}'
 ```
 
-### Create a frame
+### Create a frame (with AutoLayout)
+
+> **Important:** Always use AutoLayout on frames. See `figma-structure.md` for the full best practices guide.
+
 ```bash
 curl -s -X POST http://localhost:3056/execute \
   -H "Content-Type: application/json" \
-  -d '{"code": "const frame = figma.createFrame(); frame.name = \"MyFrame\"; frame.resize(800, 600); frame.x = 0; frame.y = 0; return { id: frame.id, name: frame.name }"}'
+  -d '{"code": "const frame = figma.createFrame(); frame.name = \"MyFrame\"; frame.layoutMode = \"VERTICAL\"; frame.primaryAxisSizingMode = \"AUTO\"; frame.counterAxisSizingMode = \"AUTO\"; frame.paddingTop = 16; frame.paddingRight = 16; frame.paddingBottom = 16; frame.paddingLeft = 16; frame.itemSpacing = 8; frame.fills = [{type: \"SOLID\", color: {r: 1, g: 1, b: 1}}]; return { id: frame.id, name: frame.name, layoutMode: frame.layoutMode }"}'
 ```
 
 ### Import a library component by key
@@ -176,11 +179,14 @@ curl -s -X POST http://localhost:3056/execute \
   -d '{"code": "const nodes = figma.currentPage.findAll(n => n.name.includes(\"Header\")); return nodes.map(n => ({ id: n.id, name: n.name, type: n.type }))"}'
 ```
 
-### Set auto-layout on a frame
+### Set auto-layout on an existing frame
+
+> **See `figma-structure.md`** for complete AutoLayout patterns, alignment reference, and gotchas.
+
 ```bash
 curl -s -X POST http://localhost:3056/execute \
   -H "Content-Type: application/json" \
-  -d '{"code": "const frame = figma.getNodeById(\"NODE_ID\"); frame.layoutMode = \"VERTICAL\"; frame.primaryAxisSizingMode = \"AUTO\"; frame.counterAxisSizingMode = \"AUTO\"; frame.itemSpacing = 8; frame.paddingTop = 16; frame.paddingBottom = 16; frame.paddingLeft = 16; frame.paddingRight = 16; return { id: frame.id, layoutMode: frame.layoutMode }"}'
+  -d '{"code": "const frame = await figma.getNodeByIdAsync(\"NODE_ID\"); frame.layoutMode = \"VERTICAL\"; frame.primaryAxisSizingMode = \"AUTO\"; frame.counterAxisSizingMode = \"AUTO\"; frame.itemSpacing = 8; frame.paddingTop = 16; frame.paddingBottom = 16; frame.paddingLeft = 16; frame.paddingRight = 16; return { id: frame.id, layoutMode: frame.layoutMode }"}'
 ```
 
 ### Save a version

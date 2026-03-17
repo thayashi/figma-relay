@@ -1,8 +1,18 @@
 {
   "permissions": {
-    "allow": [
-      "Bash(curl*localhost:3056*)",
-      "Bash(curl*http://localhost:3056*)"
+    "allow": []
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/approve-http-bridge.sh"
+          }
+        ]
+      }
     ]
   }
 }
