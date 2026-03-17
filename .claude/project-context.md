@@ -1,23 +1,24 @@
-# Figma Console MCP - Project Context
+# Figma Relay - Project Context
 
 ## Project Overview
 
-**Name:** Figma Console MCP
-**Type:** Model Context Protocol (MCP) Server
+**Name:** Figma Relay
+**Type:** HTTP Bridge + MCP Server for Figma
 **Language:** TypeScript
 **Runtime:** Node.js >= 18
+**Based on:** [figma-console-mcp](https://github.com/southleft/figma-console-mcp) (v1.11.2, 57+ tools)
 
 ## Purpose
 
-Enable AI coding assistants (Claude Code, Cursor, etc.) to interact with Figma in real-time through a two-tier architecture:
+Enable AI coding assistants (Claude Code, Cursor, etc.) and any HTTP client to interact with Figma in real-time through a three-tier architecture:
 
-1. **REST API Mode** - Read-only access to Figma file data, components, variables, and styles
-2. **Desktop Bridge Mode** - Full read/write access via a Figma plugin that executes commands locally
+1. **HTTP Bridge Mode** - REST API (port 3056) that proxies commands to Figma via WebSocket — no MCP client required
+2. **MCP Mode** - Full MCP server with 57+ tools for MCP-compatible clients
+3. **Desktop Bridge Mode** - Full read/write access via a Figma plugin that executes commands locally
 
 ## Key Technologies
 
 - **@modelcontextprotocol/sdk** - MCP protocol implementation
-- **Puppeteer / Chrome DevTools Protocol** - Browser automation for console capture
 - **Figma Plugin API** - Design manipulation via Desktop Bridge
 - **TypeScript** - Type-safe development
 - **Biome** - Formatting and linting
@@ -25,7 +26,17 @@ Enable AI coding assistants (Claude Code, Cursor, etc.) to interact with Figma i
 
 ## Architecture
 
-Two deployment modes:
+```
+curl / Python / Claude Code → HTTP Bridge (localhost:3056) → WebSocket → Desktop Bridge Plugin → Figma
+```
+
+Three deployment modes:
+
+### HTTP Bridge Mode (New in Figma Relay)
+- REST API on port 3056
+- Endpoints: /status, /join-channel, /command, /execute, /screenshot
+- Any HTTP client can control Figma
+- No MCP Gateway approval needed
 
 ### Local Mode (Desktop Bridge)
 - Connects to Figma Desktop via plugin
@@ -69,3 +80,4 @@ Two deployment modes:
 
 - [README](../README.md) - Setup and usage
 - [docs/](../docs/) - Detailed documentation
+- [Upstream: figma-console-mcp](https://github.com/southleft/figma-console-mcp)

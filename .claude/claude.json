@@ -1,6 +1,6 @@
 {
-  "name": "figma-console-mcp",
-  "description": "MCP server for accessing Figma plugin console logs, screenshots, and design system manipulation",
+  "name": "figma-relay",
+  "description": "HTTP Bridge + automation platform for Figma, built on figma-console-mcp",
   "projectType": "mcp-server",
   "language": "typescript",
   "framework": "node",

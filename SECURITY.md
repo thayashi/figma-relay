@@ -1,10 +1,10 @@
 # Security
 
-This document outlines the security architecture and practices for Figma Console MCP.
+This document outlines the security architecture and practices for Figma Relay (based on [figma-console-mcp](https://github.com/thayashi/figma-relay)).
 
 ## Overview
 
-Figma Console MCP is designed with security as a priority. The project is **fully open source** (MIT licensed), allowing complete code auditing by security teams.
+Figma Relay is designed with security as a priority. The project is **fully open source** (MIT licensed), allowing complete code auditing by security teams.
 
 ## Architecture Security
 
@@ -33,7 +33,7 @@ Figma Console MCP is designed with security as a priority. The project is **full
 
 ## Authentication
 
-Figma Console MCP uses **Figma's native authentication** mechanisms:
+Figma Relay uses **Figma's native authentication** mechanisms:
 
 ### Personal Access Tokens (PATs)
 - Generated in Figma account settings
@@ -68,7 +68,7 @@ The `figma_execute` tool allows running JavaScript in Figma's plugin context. Se
 
 ## Data Access Scope
 
-Figma Console MCP can access:
+Figma Relay can access:
 
 | Data Type | Access Level | Notes |
 |-----------|--------------|-------|
@@ -122,7 +122,7 @@ For maximum security, enterprises can:
 
 If you discover a security vulnerability, please report it responsibly:
 
-1. Open a [private security advisory](https://github.com/southleft/figma-console-mcp/security/advisories/new) on GitHub
+1. Open a [private security advisory](https://github.com/thayashi/figma-relay/security/advisories/new) on GitHub
 2. **Do not** open a public GitHub issue for security vulnerabilities
 3. Include steps to reproduce and potential impact
 4. We aim to respond within 48 hours
@@ -141,4 +141,4 @@ If you discover a security vulnerability, please report it responsibly:
 
 ## Questions?
 
-For security-related inquiries, open a [GitHub Discussion](https://github.com/southleft/figma-console-mcp/discussions) or use the [private security advisory](https://github.com/southleft/figma-console-mcp/security/advisories/new) feature for sensitive matters.
+For security-related inquiries, open a [GitHub Discussion](https://github.com/thayashi/figma-relay/discussions) or use the [private security advisory](https://github.com/thayashi/figma-relay/security/advisories/new) feature for sensitive matters.
