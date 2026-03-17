@@ -243,6 +243,133 @@ footer.layoutSizingHorizontal = 'FILL';
 footer.layoutSizingVertical = 'HUG';
 ```
 
+### Pattern E: Overlay / Badge (absolute positioning inside AutoLayout)
+
+Use `layoutPositioning = 'ABSOLUTE'` for elements that float over AutoLayout content — badges, close buttons, notification dots, floating action buttons. These children are excluded from the layout flow but still respect `constraints`.
+
+```javascript
+const card = figma.createFrame();
+card.name = 'CardWithBadge';
+card.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
+card.cornerRadius = 12;
+card.layoutMode = 'VERTICAL';
+card.primaryAxisSizingMode = 'AUTO';
+card.counterAxisSizingMode = 'FIXED';
+card.resize(300, 1);
+card.paddingTop = 16;
+card.paddingRight = 16;
+card.paddingBottom = 16;
+card.paddingLeft = 16;
+card.itemSpacing = 8;
+card.clipsContent = true;
+
+// Normal flow children
+const title = figma.createText();
+title.characters = 'Card Title';
+title.fontSize = 16;
+title.fontName = { family: 'Inter', style: 'Semi Bold' };
+title.fills = [{ type: 'SOLID', color: { r: 0.13, g: 0.13, b: 0.13 } }];
+card.appendChild(title);
+title.layoutSizingHorizontal = 'FILL';
+title.layoutSizingVertical = 'HUG';
+
+// Absolute-positioned badge (top-right corner)
+const badge = figma.createFrame();
+badge.name = 'NotificationBadge';
+badge.fills = [{ type: 'SOLID', color: { r: 0.9, g: 0.2, b: 0.2 } }];
+badge.cornerRadius = 10;
+badge.resize(20, 20);
+badge.layoutMode = 'HORIZONTAL';
+badge.primaryAxisAlignItems = 'CENTER';
+badge.counterAxisAlignItems = 'CENTER';
+
+// Append FIRST, then set absolute positioning
+card.appendChild(badge);
+badge.layoutPositioning = 'ABSOLUTE';    // Ignores auto layout flow
+badge.constraints = {
+  horizontal: 'MAX',                     // Pin to right edge
+  vertical: 'MIN'                        // Pin to top edge
+};
+badge.x = 274;                           // Position from left (card width - padding - badge)
+badge.y = 6;                             // Position from top
+
+const badgeText = figma.createText();
+badgeText.characters = '3';
+badgeText.fontSize = 11;
+badgeText.fontName = { family: 'Inter', style: 'Semi Bold' };
+badgeText.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
+badge.appendChild(badgeText);
+badgeText.layoutSizingHorizontal = 'HUG';
+badgeText.layoutSizingVertical = 'HUG';
+```
+
+Key rules for absolute positioning:
+- `layoutPositioning = 'ABSOLUTE'` only works on children of AutoLayout frames
+- `constraints` only work on absolute-positioned children (or children of non-AutoLayout frames)
+- `x`/`y` ARE respected for absolute children (unlike normal AutoLayout children)
+- Constraint values: `horizontal` → `'MIN'` (left), `'CENTER'`, `'MAX'` (right), `'STRETCH'`, `'SCALE'`
+- Constraint values: `vertical` → `'MIN'` (top), `'CENTER'`, `'MAX'` (bottom), `'STRETCH'`, `'SCALE'`
+- Use for: badges, close/dismiss buttons, floating icons, status indicators, decorative elements
+
+### Pattern F: Reusable Components and Variants
+
+Create components from finished frames, then combine related components into variant sets. Use slash-separated naming (`Button/Primary`, `Button/Secondary`) — Figma converts slash groups into variant properties.
+
+```javascript
+// 1. Create individual component states
+const states = ['Default', 'Hover', 'Disabled'];
+const components = [];
+
+for (const state of states) {
+  const btn = figma.createFrame();
+  btn.name = 'Button/' + state;            // Slash naming for variant conversion
+  btn.fills = [{ type: 'SOLID', color:
+    state === 'Default'  ? { r: 0.20, g: 0.36, b: 0.84 } :
+    state === 'Hover'    ? { r: 0.16, g: 0.29, b: 0.67 } :
+                           { r: 0.80, g: 0.80, b: 0.80 }
+  }];
+  btn.cornerRadius = 8;
+  btn.layoutMode = 'HORIZONTAL';
+  btn.primaryAxisSizingMode = 'AUTO';
+  btn.counterAxisSizingMode = 'AUTO';
+  btn.primaryAxisAlignItems = 'CENTER';
+  btn.counterAxisAlignItems = 'CENTER';
+  btn.paddingTop = 12;
+  btn.paddingRight = 24;
+  btn.paddingBottom = 12;
+  btn.paddingLeft = 24;
+
+  const label = figma.createText();
+  label.characters = 'Button';
+  label.fontSize = 14;
+  label.fontName = { family: 'Inter', style: 'Semi Bold' };
+  label.fills = [{ type: 'SOLID', color: state === 'Disabled'
+    ? { r: 0.5, g: 0.5, b: 0.5 }
+    : { r: 1, g: 1, b: 1 }
+  }];
+  btn.appendChild(label);
+  label.layoutSizingHorizontal = 'HUG';
+  label.layoutSizingVertical = 'HUG';
+
+  // 2. Convert frame to component
+  const comp = figma.createComponentFromNode(btn);
+  components.push(comp);
+}
+
+// 3. Combine into a variant set (all must have same slash count)
+const variantSet = figma.combineAsVariants(components, figma.currentPage);
+variantSet.name = 'Button';
+```
+
+Key rules for components/variants:
+- `figma.createComponentFromNode(node)` converts any frame into a reusable component
+- `figma.combineAsVariants(components, parent)` groups components into a variant set
+- All components MUST have the same number of slashes in their names (e.g., `Button/Primary`, `Button/Secondary`)
+- Slash groups become variant property values — `Button/Large/Primary` → Property1=Large, Property2=Primary
+- Create instances with: `const instance = componentNode.createInstance()`
+- Set variant properties on instances: `instance.setProperties({ 'Property1': 'Large' })`
+- Only create variants when states are well-defined — avoid combinatorial explosion
+
 ## Alignment & Sizing Reference
 
 ### Frame Properties (control the frame's own behavior)
@@ -264,6 +391,8 @@ footer.layoutSizingVertical = 'HUG';
 |---|---|---|---|
 | `layoutSizingHorizontal` | `'HUG'`, `'FILL'`, `'FIXED'` | `width: auto / 100% / Npx` | Set AFTER appendChild |
 | `layoutSizingVertical` | `'HUG'`, `'FILL'`, `'FIXED'` | `height: auto / 100% / Npx` | Set AFTER appendChild |
+| `layoutPositioning` | `'AUTO'`, `'ABSOLUTE'` | `position: relative / absolute` | ABSOLUTE ignores flow, enables constraints + x/y |
+| `constraints` | `{ horizontal, vertical }` | — | Only on ABSOLUTE children or non-AutoLayout frame children |
 
 ### Axis Orientation Quick Reference
 
