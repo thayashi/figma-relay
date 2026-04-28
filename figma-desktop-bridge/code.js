@@ -186,6 +186,112 @@ function hexToFigmaRGB(hex) {
   return { r: r, g: g, b: b, a: a };
 }
 
+// ============================================================================
+// HELPER FUNCTIONS — Attached to globalThis so EXECUTE_CODE eval can access them.
+// Agent-submitted code can call these directly, e.g.:
+//   return await __batchProcess(nodes, 20, async (batch) => { ... })
+// ============================================================================
+
+var __currentRequestId = null;
+
+globalThis.__reportProgress = function __reportProgress(detail) {
+  if (!__currentRequestId) return;
+  figma.ui.postMessage({
+    type: 'EXECUTE_CODE_PROGRESS',
+    requestId: __currentRequestId,
+    progress: detail || {}
+  });
+};
+
+/**
+ * Process an array in batches to avoid timeout on large collections.
+ * Sends a progress heartbeat after each batch.
+ * @param {any[]} items  - Full array to process
+ * @param {number} size  - Items per batch
+ * @param {function} fn  - async (batch, batchIndex) => result
+ * @returns {any[]}      - Flat array of all batch results
+ */
+globalThis.__batchProcess = async function __batchProcess(items, size, fn) {
+  var results = [];
+  for (var i = 0; i < items.length; i += size) {
+    var batch = items.slice(i, i + size);
+    var r = await fn(batch, Math.floor(i / size));
+    if (Array.isArray(r)) {
+      for (var j = 0; j < r.length; j++) results.push(r[j]);
+    } else if (r !== undefined) {
+      results.push(r);
+    }
+    globalThis.__reportProgress({ done: Math.min(i + size, items.length), total: items.length });
+  }
+  return results;
+};
+
+globalThis.__loadFontsForNodes = async function __loadFontsForNodes(textNodes) {
+  var seen = {};
+  var toLoad = [];
+  for (var i = 0; i < textNodes.length; i++) {
+    var node = textNodes[i];
+    if (node.type !== 'TEXT') continue;
+    var len = node.characters.length;
+    if (len === 0) continue;
+    for (var ci = 0; ci < len; ci++) {
+      var font = node.getRangeFontName(ci, ci + 1);
+      if (font && font.family) {
+        var key = font.family + '::' + font.style;
+        if (!seen[key]) {
+          seen[key] = true;
+          toLoad.push(font);
+        }
+      }
+    }
+  }
+  for (var i = 0; i < toLoad.length; i++) {
+    await figma.loadFontAsync(toLoad[i]);
+  }
+  return { fontsLoaded: toLoad.length, nodesScanned: textNodes.length };
+};
+
+globalThis.__findNodes = function __findNodes(predicate, opts) {
+  var root = figma.currentPage;
+  if (opts && opts.pageId) {
+    var pages = figma.root.children;
+    for (var i = 0; i < pages.length; i++) {
+      if (pages[i].id === opts.pageId) { root = pages[i]; break; }
+    }
+  }
+  var nodes = root.findAll(predicate);
+  var out = [];
+  for (var i = 0; i < nodes.length; i++) {
+    out.push({ id: nodes[i].id, name: nodes[i].name, type: nodes[i].type });
+  }
+  return out;
+};
+
+globalThis.__batchSetText = async function __batchSetText(entries) {
+  var textNodes = [];
+  var nodeMap = {};
+  for (var i = 0; i < entries.length; i++) {
+    var node = figma.getNodeById(entries[i].id);
+    if (node && node.type === 'TEXT') {
+      textNodes.push(node);
+      nodeMap[entries[i].id] = { node: node, chars: entries[i].characters };
+    }
+  }
+  await globalThis.__loadFontsForNodes(textNodes);
+  var updated = 0;
+  var errors = [];
+  var ids = Object.keys(nodeMap);
+  for (var i = 0; i < ids.length; i++) {
+    try {
+      nodeMap[ids[i]].node.characters = nodeMap[ids[i]].chars;
+      updated++;
+    } catch (e) {
+      errors.push(ids[i] + ': ' + (e.message || String(e)));
+    }
+  }
+  return { updated: updated, errors: errors };
+};
+
 // Listen for requests from UI (e.g., component data requests, write operations)
 figma.ui.onmessage = async (msg) => {
 
@@ -194,6 +300,7 @@ figma.ui.onmessage = async (msg) => {
   // ============================================================================
   if (msg.type === 'EXECUTE_CODE') {
     try {
+      __currentRequestId = msg.requestId;
       console.log('🌉 [Desktop Bridge] Executing code, length:', msg.code.length);
 
       // Use eval with async IIFE wrapper instead of AsyncFunction constructor
@@ -206,17 +313,8 @@ figma.ui.onmessage = async (msg) => {
 
       console.log('🌉 [Desktop Bridge] Wrapped code for eval');
 
-      // Execute with timeout
-      var timeoutMs = msg.timeout || 5000;
-      var timeoutPromise = new Promise(function(_, reject) {
-        setTimeout(function() {
-          reject(new Error('Execution timed out after ' + timeoutMs + 'ms'));
-        }, timeoutMs);
-      });
-
       var codePromise;
       try {
-        // eval returns the Promise from the async IIFE
         codePromise = eval(wrappedCode);
       } catch (syntaxError) {
         // Log the actual syntax error message
@@ -231,10 +329,7 @@ figma.ui.onmessage = async (msg) => {
         return;
       }
 
-      var result = await Promise.race([
-        codePromise,
-        timeoutPromise
-      ]);
+      var result = await codePromise;
 
       console.log('🌉 [Desktop Bridge] Code executed successfully, result type:', typeof result);
 
@@ -285,8 +380,10 @@ figma.ui.onmessage = async (msg) => {
           fileKey: figma.fileKey || null
         }
       });
+      __currentRequestId = null;
 
     } catch (error) {
+      __currentRequestId = null;
       // Extract error message explicitly - don't rely on console.error serialization
       var errorName = error && error.name ? error.name : 'Error';
       var errorMsg = error && error.message ? error.message : String(error);

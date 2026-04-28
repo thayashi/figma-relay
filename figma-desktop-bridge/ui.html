@@ -116,6 +116,7 @@
     window.__figmaComponentData = null;
     window.__figmaComponentRequests = new Map();
     window.__figmaPendingRequests = new Map();
+    window.__figmaRequestIdToWs = new Map();
 
     let requestIdCounter = 0;
 
@@ -136,9 +137,15 @@
       return new Promise((resolve, reject) => {
         const requestId = type.toLowerCase() + '_' + (++requestIdCounter) + '_' + Date.now();
 
+        // Map plugin requestId to WS context for progress forwarding
+        if (window.__currentWsContext) {
+          window.__figmaRequestIdToWs.set(requestId, window.__currentWsContext);
+        }
+
         const timeoutId = setTimeout(() => {
           if (window.__figmaPendingRequests.has(requestId)) {
             window.__figmaPendingRequests.delete(requestId);
+            window.__figmaRequestIdToWs.delete(requestId);
             reject(new Error(type + ' request timed out after ' + timeoutMs + 'ms'));
           }
         }, timeoutMs);
@@ -681,14 +688,20 @@
               return;
             }
 
+            // Track WS context so progress messages from EXECUTE_CODE can be
+            // forwarded back to the correct WS connection with the right id.
+            window.__currentWsContext = { ws: activeWs, wsId: message.id };
+
             // Call the handler (returns a Promise) and send back the result
             Promise.resolve(handler(message.params || {}))
               .then(function(result) {
+                window.__currentWsContext = null;
                 if (activeWs.readyState === 1) {
                   activeWs.send(JSON.stringify({ id: message.id, result: result }));
                 }
               })
               .catch(function(err) {
+                window.__currentWsContext = null;
                 if (activeWs.readyState === 1) {
                   activeWs.send(JSON.stringify({ id: message.id, error: err.message || String(err) }));
                 }
@@ -803,6 +816,7 @@
             request.resolve({ success: false, error: msg.error || 'Unknown error' });
           }
           window.__figmaPendingRequests.delete(msg.requestId);
+          window.__figmaRequestIdToWs.delete(msg.requestId);
         }
       };
 
@@ -837,6 +851,30 @@
         // Variable operations
         case 'EXECUTE_CODE_RESULT':
           handleResult('EXECUTE_CODE', 'result');
+          break;
+
+        case 'EXECUTE_CODE_PROGRESS':
+          // Reset the UI-side timeout timer for this request
+          var pendingReq = window.__figmaPendingRequests.get(msg.requestId);
+          if (pendingReq && pendingReq.timeoutId) {
+            clearTimeout(pendingReq.timeoutId);
+            pendingReq.timeoutId = setTimeout(function() {
+              if (window.__figmaPendingRequests.has(msg.requestId)) {
+                window.__figmaPendingRequests.delete(msg.requestId);
+                window.__figmaRequestIdToWs.delete(msg.requestId);
+                if (pendingReq.reject) pendingReq.reject(new Error('EXECUTE_CODE timed out (no progress)'));
+              }
+            }, 15000);
+          }
+          // Forward progress heartbeat to the WS server so it can reset the timeout timer
+          var wsCtx = window.__figmaRequestIdToWs.get(msg.requestId);
+          if (wsCtx && wsCtx.ws.readyState === 1) {
+            wsCtx.ws.send(JSON.stringify({
+              id: wsCtx.wsId,
+              type: 'PROGRESS',
+              progress: msg.progress || {}
+            }));
+          }
           break;
         case 'UPDATE_VARIABLE_RESULT':
           handleResult('UPDATE_VARIABLE', 'variable');

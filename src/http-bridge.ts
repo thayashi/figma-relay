@@ -18,6 +18,8 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
+import pino from "pino";
 import { FigmaWebSocketServer } from "./core/websocket-server.js";
 import { WebSocketConnector } from "./core/websocket-connector.js";
 import {
@@ -31,12 +33,46 @@ import { createChildLogger } from "./core/logger.js";
 
 const logger = createChildLogger({ component: "http-bridge" });
 
-import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, mkdirSync, createWriteStream } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
+// ---------------------------------------------------------------------------
+// Request logger — writes structured JSON to logs/<session-timestamp>.jsonl
+// ---------------------------------------------------------------------------
+
+function createRequestLogger(): pino.Logger {
+	const logsDir = resolve(process.cwd(), "logs");
+	mkdirSync(logsDir, { recursive: true });
+
+	const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+	const logPath = join(logsDir, `${ts}.jsonl`);
+
+	const dest = pino.destination({ dest: logPath, sync: false });
+	const reqLog = pino({ level: "info" }, dest);
+
+	return reqLog;
+}
+
+const reqLogger = createRequestLogger();
+
+interface RequestLogEntry {
+	requestId: string;
+	endpoint: string;
+	codeLength?: number;
+	codePreview?: string;
+	command?: string;
+	timeout?: number;
+	targetFile?: string;
+	durationMs: number;
+	success: boolean;
+	errorMessage?: string;
+	responseSize: number;
+	statusCode: number;
+}
+
 const DEFAULT_HTTP_PORT = 3056;
-const MAX_EXECUTE_TIMEOUT = 30000;
+const MAX_EXECUTE_TIMEOUT = 60000;
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB (screenshots can be large)
 
 // ---------------------------------------------------------------------------
@@ -55,10 +91,12 @@ function setCorsHeaders(res: ServerResponse): void {
 	res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-function json(res: ServerResponse, status: number, body: unknown): void {
+function json(res: ServerResponse, status: number, body: unknown): number {
 	setCorsHeaders(res);
+	const payload = JSON.stringify(body);
 	res.writeHead(status, { "Content-Type": "application/json" });
-	res.end(JSON.stringify(body));
+	res.end(payload);
+	return Buffer.byteLength(payload, "utf-8");
 }
 
 function parseBody(req: IncomingMessage): Promise<Record<string, any>> {
@@ -123,22 +161,25 @@ function resolveFileKey(target: string | undefined): string | undefined {
 function handleStatus(_req: IncomingMessage, res: ServerResponse): void {
 	const connected = wsServer?.isClientConnected() ?? false;
 	const files = wsServer?.getConnectedFiles() ?? [];
+	const pendingRequests = wsServer?.getPendingRequestCount() ?? 0;
 
 	json(res, 200, {
 		wsConnected: connected,
 		wsPort,
 		connectedFiles: files,
+		pendingRequests,
 	});
 }
 
 async function handleJoinChannel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+	const requestId = randomUUID();
+	const startTime = performance.now();
 	const body = await parseBody(req);
 	const channel = (body.channel || body.fileName) as string | undefined;
 
 	if (!channel) {
-		// List available channels when none specified
 		const files = wsServer?.getConnectedFiles() ?? [];
-		json(res, 200, {
+		const size = json(res, 200, {
 			message: "Provide a 'channel' (fileKey) to set the active file.",
 			availableChannels: files.map((f) => ({
 				fileKey: f.fileKey,
@@ -146,57 +187,82 @@ async function handleJoinChannel(req: IncomingMessage, res: ServerResponse): Pro
 				isActive: f.isActive,
 			})),
 		});
+		reqLogger.info({ requestId, endpoint: "/join-channel", durationMs: Math.round(performance.now() - startTime), success: true, statusCode: 200, responseSize: size } satisfies RequestLogEntry);
 		return;
 	}
 
 	const server = requireWsServer(res);
-	if (!server) return;
+	if (!server) {
+		reqLogger.info({ requestId, endpoint: "/join-channel", targetFile: channel, durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "No plugin connected", statusCode: 503, responseSize: 0 } satisfies RequestLogEntry);
+		return;
+	}
 
 	const resolvedKey = resolveFileKey(channel);
 	const switched = resolvedKey ? server.setActiveFile(resolvedKey) : false;
 	if (!switched) {
-		json(res, 404, {
+		const size = json(res, 404, {
 			error: `File "${channel}" is not connected. Open the Desktop Bridge plugin in that file.`,
 			availableChannels: server.getConnectedFiles().map((f) => ({
 				fileKey: f.fileKey,
 				fileName: f.fileName,
 			})),
 		});
+		reqLogger.info({ requestId, endpoint: "/join-channel", targetFile: channel, durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "File not connected", statusCode: 404, responseSize: size } satisfies RequestLogEntry);
 		return;
 	}
 
-	json(res, 200, { success: true, activeChannel: resolvedKey });
+	const size = json(res, 200, { success: true, activeChannel: resolvedKey });
+	reqLogger.info({ requestId, endpoint: "/join-channel", targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: true, statusCode: 200, responseSize: size } satisfies RequestLogEntry);
 }
 
 async function handleCommand(req: IncomingMessage, res: ServerResponse): Promise<void> {
+	const requestId = randomUUID();
+	const startTime = performance.now();
 	const body = await parseBody(req);
 	const { command, params = {}, timeout = 15000, fileKey, fileName } = body;
 
 	if (!command || typeof command !== "string") {
-		json(res, 400, { error: "Missing required field: 'command' (string)" });
+		const size = json(res, 400, { error: "Missing required field: 'command' (string)" });
+		reqLogger.info({ requestId, endpoint: "/command", durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "Missing command field", statusCode: 400, responseSize: size } satisfies RequestLogEntry);
 		return;
 	}
 
 	const server = requireWsServer(res);
-	if (!server) return;
+	if (!server) {
+		reqLogger.info({ requestId, endpoint: "/command", command, durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "No plugin connected", statusCode: 503, responseSize: 0 } satisfies RequestLogEntry);
+		return;
+	}
 
 	const resolvedKey = resolveFileKey(fileKey || fileName);
 
 	try {
 		const result = await server.sendCommand(command, params, timeout, resolvedKey);
-		json(res, 200, { success: true, result });
+		const size = json(res, 200, { success: true, result });
+		reqLogger.info({ requestId, endpoint: "/command", command, timeout, targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: true, statusCode: 200, responseSize: size } satisfies RequestLogEntry);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		json(res, 502, { success: false, error: message });
+		const isTimeout = message.includes("timed out");
+		const statusCode = isTimeout ? 504 : 502;
+		const size = json(res, statusCode, {
+			success: false,
+			error: message,
+			...(isTimeout && { timedOut: true, mayStillBeRunning: true, requestId }),
+		});
+		reqLogger.info({ requestId, endpoint: "/command", command, timeout, targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: message, statusCode, responseSize: size } satisfies RequestLogEntry);
 	}
 }
 
 async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Promise<void> {
+	const requestId = randomUUID();
+	const startTime = performance.now();
 	const body = await parseBody(req);
 	const { nodeId = "", format = "PNG", scale = 2, save, fileKey, fileName } = body;
 
 	const server = requireWsServer(res);
-	if (!server) return;
+	if (!server) {
+		reqLogger.info({ requestId, endpoint: "/screenshot", durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "No plugin connected", statusCode: 503, responseSize: 0 } satisfies RequestLogEntry);
+		return;
+	}
 
 	const resolvedKey = resolveFileKey(fileKey || fileName);
 	if (resolvedKey) server.setActiveFile(resolvedKey);
@@ -207,13 +273,13 @@ async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Prom
 		const result = await connector.captureScreenshot(nodeId, { format, scale });
 
 		if (!result?.success || !result?.image?.base64) {
-			json(res, 502, { success: false, error: "Screenshot capture failed", result });
+			const size = json(res, 502, { success: false, error: "Screenshot capture failed", result });
+			reqLogger.info({ requestId, endpoint: "/screenshot", targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "Screenshot capture failed", statusCode: 502, responseSize: size } satisfies RequestLogEntry);
 			return;
 		}
 
 		const base64 = result.image.base64;
 
-		// If save requested or default, write to temp file for viewing
 		if (save !== false) {
 			const dir = join(tmpdir(), "figma-screenshots");
 			mkdirSync(dir, { recursive: true });
@@ -222,7 +288,7 @@ async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Prom
 			const filepath = join(dir, filename);
 			writeFileSync(filepath, Buffer.from(base64, "base64"));
 
-			json(res, 200, {
+			const size = json(res, 200, {
 				success: true,
 				filepath,
 				format,
@@ -230,11 +296,11 @@ async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Prom
 				byteLength: result.image.byteLength,
 				node: result.image.node,
 			});
+			reqLogger.info({ requestId, endpoint: "/screenshot", targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: true, statusCode: 200, responseSize: size } satisfies RequestLogEntry);
 			return;
 		}
 
-		// Return raw base64 if save=false
-		json(res, 200, {
+		const size = json(res, 200, {
 			success: true,
 			base64,
 			format,
@@ -242,27 +308,34 @@ async function handleScreenshot(req: IncomingMessage, res: ServerResponse): Prom
 			byteLength: result.image.byteLength,
 			node: result.image.node,
 		});
+		reqLogger.info({ requestId, endpoint: "/screenshot", targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: true, statusCode: 200, responseSize: size } satisfies RequestLogEntry);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		json(res, 502, { success: false, error: message });
+		const size = json(res, 502, { success: false, error: message });
+		reqLogger.info({ requestId, endpoint: "/screenshot", targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: message, statusCode: 502, responseSize: size } satisfies RequestLogEntry);
 	}
 }
 
 async function handleExecute(req: IncomingMessage, res: ServerResponse): Promise<void> {
+	const requestId = randomUUID();
+	const startTime = performance.now();
 	const body = await parseBody(req);
-	const { code, timeout = 5000, fileKey, fileName } = body;
+	const { code, timeout = 15000, fileKey, fileName } = body;
 
 	if (!code || typeof code !== "string") {
-		json(res, 400, { error: "Missing required field: 'code' (string)" });
+		const size = json(res, 400, { error: "Missing required field: 'code' (string)" });
+		reqLogger.info({ requestId, endpoint: "/execute", durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "Missing code field", statusCode: 400, responseSize: size } satisfies RequestLogEntry);
 		return;
 	}
 
 	const server = requireWsServer(res);
-	if (!server) return;
+	if (!server) {
+		reqLogger.info({ requestId, endpoint: "/execute", codeLength: code.length, codePreview: code.slice(0, 120), durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: "No plugin connected", statusCode: 503, responseSize: 0 } satisfies RequestLogEntry);
+		return;
+	}
 
 	const resolvedKey = resolveFileKey(fileKey || fileName);
 
-	// If a specific file is targeted, set it as active before executing
 	if (resolvedKey) server.setActiveFile(resolvedKey);
 
 	const cappedTimeout = Math.min(Number(timeout) || 5000, MAX_EXECUTE_TIMEOUT);
@@ -270,10 +343,17 @@ async function handleExecute(req: IncomingMessage, res: ServerResponse): Promise
 
 	try {
 		const result = await connector.executeCodeViaUI(code, cappedTimeout);
-		json(res, 200, { success: true, result });
+		const size = json(res, 200, { success: true, result });
+		reqLogger.info({ requestId, endpoint: "/execute", codeLength: code.length, codePreview: code.slice(0, 120), timeout: cappedTimeout, targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: true, statusCode: 200, responseSize: size } satisfies RequestLogEntry);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		json(res, 502, { success: false, error: message });
+		const isTimeout = message.includes("timed out");
+		const size = json(res, 504, {
+			success: false,
+			error: message,
+			...(isTimeout && { timedOut: true, mayStillBeRunning: true, requestId }),
+		});
+		reqLogger.info({ requestId, endpoint: "/execute", codeLength: code.length, codePreview: code.slice(0, 120), timeout: cappedTimeout, targetFile: resolvedKey, durationMs: Math.round(performance.now() - startTime), success: false, errorMessage: message, statusCode: 504, responseSize: size } satisfies RequestLogEntry);
 	}
 }
 
@@ -392,7 +472,8 @@ async function main(): Promise<void> {
 		console.log(`  POST http://localhost:${httpPort}/join-channel`);
 		console.log(`  POST http://localhost:${httpPort}/command`);
 		console.log(`  POST http://localhost:${httpPort}/execute`);
-		console.log(`  POST http://localhost:${httpPort}/screenshot\n`);
+		console.log(`  POST http://localhost:${httpPort}/screenshot`);
+		console.log(`\nRequest logs: logs/\n`);
 	});
 
 	// Graceful shutdown
