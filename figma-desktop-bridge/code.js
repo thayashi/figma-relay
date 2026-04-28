@@ -187,27 +187,21 @@ function hexToFigmaRGB(hex) {
 }
 
 // ============================================================================
-// HELPER FUNCTIONS — Available to EXECUTE_CODE eval scope.
+// HELPER FUNCTIONS — Attached to globalThis so EXECUTE_CODE eval can access them.
 // Agent-submitted code can call these directly, e.g.:
 //   return await __batchProcess(nodes, 20, async (batch) => { ... })
 // ============================================================================
 
 var __currentRequestId = null;
 
-/**
- * Send a progress heartbeat to the bridge.
- * Resets the timeout timer on the server so long-running operations
- * don't get killed while still making progress.
- * Can be called directly from agent code: __reportProgress({ done: 50, total: 200 })
- */
-function __reportProgress(detail) {
+globalThis.__reportProgress = function __reportProgress(detail) {
   if (!__currentRequestId) return;
   figma.ui.postMessage({
     type: 'EXECUTE_CODE_PROGRESS',
     requestId: __currentRequestId,
     progress: detail || {}
   });
-}
+};
 
 /**
  * Process an array in batches to avoid timeout on large collections.
@@ -217,7 +211,7 @@ function __reportProgress(detail) {
  * @param {function} fn  - async (batch, batchIndex) => result
  * @returns {any[]}      - Flat array of all batch results
  */
-async function __batchProcess(items, size, fn) {
+globalThis.__batchProcess = async function __batchProcess(items, size, fn) {
   var results = [];
   for (var i = 0; i < items.length; i += size) {
     var batch = items.slice(i, i + size);
@@ -227,18 +221,12 @@ async function __batchProcess(items, size, fn) {
     } else if (r !== undefined) {
       results.push(r);
     }
-    __reportProgress({ done: Math.min(i + size, items.length), total: items.length });
+    globalThis.__reportProgress({ done: Math.min(i + size, items.length), total: items.length });
   }
   return results;
-}
+};
 
-/**
- * Load fonts for a set of text nodes, deduplicating font requests.
- * Figma's loadFontAsync is slow — calling it once per unique font
- * instead of once per node saves significant time.
- * @param {SceneNode[]} textNodes - Array of TEXT nodes
- */
-async function __loadFontsForNodes(textNodes) {
+globalThis.__loadFontsForNodes = async function __loadFontsForNodes(textNodes) {
   var seen = {};
   var toLoad = [];
   for (var i = 0; i < textNodes.length; i++) {
@@ -261,18 +249,9 @@ async function __loadFontsForNodes(textNodes) {
     await figma.loadFontAsync(toLoad[i]);
   }
   return { fontsLoaded: toLoad.length, nodesScanned: textNodes.length };
-}
+};
 
-/**
- * Find all nodes matching a predicate, with an optional page scope.
- * Returns lightweight descriptors instead of full node references
- * to keep response payloads small.
- * @param {function} predicate - (node) => boolean
- * @param {object}   [opts]
- * @param {string}   [opts.pageId] - Limit search to a specific page
- * @returns {{ id: string, name: string, type: string }[]}
- */
-function __findNodes(predicate, opts) {
+globalThis.__findNodes = function __findNodes(predicate, opts) {
   var root = figma.currentPage;
   if (opts && opts.pageId) {
     var pages = figma.root.children;
@@ -286,15 +265,9 @@ function __findNodes(predicate, opts) {
     out.push({ id: nodes[i].id, name: nodes[i].name, type: nodes[i].type });
   }
   return out;
-}
+};
 
-/**
- * Set text content on multiple text nodes by ID.
- * Loads all required fonts first (deduplicated), then sets characters.
- * @param {{ id: string, characters: string }[]} entries
- * @returns {{ updated: number, errors: string[] }}
- */
-async function __batchSetText(entries) {
+globalThis.__batchSetText = async function __batchSetText(entries) {
   var textNodes = [];
   var nodeMap = {};
   for (var i = 0; i < entries.length; i++) {
@@ -304,7 +277,7 @@ async function __batchSetText(entries) {
       nodeMap[entries[i].id] = { node: node, chars: entries[i].characters };
     }
   }
-  await __loadFontsForNodes(textNodes);
+  await globalThis.__loadFontsForNodes(textNodes);
   var updated = 0;
   var errors = [];
   var ids = Object.keys(nodeMap);
@@ -317,7 +290,7 @@ async function __batchSetText(entries) {
     }
   }
   return { updated: updated, errors: errors };
-}
+};
 
 // Listen for requests from UI (e.g., component data requests, write operations)
 figma.ui.onmessage = async (msg) => {
@@ -340,17 +313,8 @@ figma.ui.onmessage = async (msg) => {
 
       console.log('🌉 [Desktop Bridge] Wrapped code for eval');
 
-      // Execute with timeout
-      var timeoutMs = msg.timeout || 5000;
-      var timeoutPromise = new Promise(function(_, reject) {
-        setTimeout(function() {
-          reject(new Error('Execution timed out after ' + timeoutMs + 'ms'));
-        }, timeoutMs);
-      });
-
       var codePromise;
       try {
-        // eval returns the Promise from the async IIFE
         codePromise = eval(wrappedCode);
       } catch (syntaxError) {
         // Log the actual syntax error message
@@ -365,10 +329,7 @@ figma.ui.onmessage = async (msg) => {
         return;
       }
 
-      var result = await Promise.race([
-        codePromise,
-        timeoutPromise
-      ]);
+      var result = await codePromise;
 
       console.log('🌉 [Desktop Bridge] Code executed successfully, result type:', typeof result);
 

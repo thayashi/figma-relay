@@ -854,6 +854,18 @@
           break;
 
         case 'EXECUTE_CODE_PROGRESS':
+          // Reset the UI-side timeout timer for this request
+          var pendingReq = window.__figmaPendingRequests.get(msg.requestId);
+          if (pendingReq && pendingReq.timeoutId) {
+            clearTimeout(pendingReq.timeoutId);
+            pendingReq.timeoutId = setTimeout(function() {
+              if (window.__figmaPendingRequests.has(msg.requestId)) {
+                window.__figmaPendingRequests.delete(msg.requestId);
+                window.__figmaRequestIdToWs.delete(msg.requestId);
+                if (pendingReq.reject) pendingReq.reject(new Error('EXECUTE_CODE timed out (no progress)'));
+              }
+            }, 15000);
+          }
           // Forward progress heartbeat to the WS server so it can reset the timeout timer
           var wsCtx = window.__figmaRequestIdToWs.get(msg.requestId);
           if (wsCtx && wsCtx.ws.readyState === 1) {
