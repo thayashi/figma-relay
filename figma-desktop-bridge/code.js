@@ -186,6 +186,139 @@ function hexToFigmaRGB(hex) {
   return { r: r, g: g, b: b, a: a };
 }
 
+// ============================================================================
+// HELPER FUNCTIONS — Available to EXECUTE_CODE eval scope.
+// Agent-submitted code can call these directly, e.g.:
+//   return await __batchProcess(nodes, 20, async (batch) => { ... })
+// ============================================================================
+
+var __currentRequestId = null;
+
+/**
+ * Send a progress heartbeat to the bridge.
+ * Resets the timeout timer on the server so long-running operations
+ * don't get killed while still making progress.
+ * Can be called directly from agent code: __reportProgress({ done: 50, total: 200 })
+ */
+function __reportProgress(detail) {
+  if (!__currentRequestId) return;
+  figma.ui.postMessage({
+    type: 'EXECUTE_CODE_PROGRESS',
+    requestId: __currentRequestId,
+    progress: detail || {}
+  });
+}
+
+/**
+ * Process an array in batches to avoid timeout on large collections.
+ * Sends a progress heartbeat after each batch.
+ * @param {any[]} items  - Full array to process
+ * @param {number} size  - Items per batch
+ * @param {function} fn  - async (batch, batchIndex) => result
+ * @returns {any[]}      - Flat array of all batch results
+ */
+async function __batchProcess(items, size, fn) {
+  var results = [];
+  for (var i = 0; i < items.length; i += size) {
+    var batch = items.slice(i, i + size);
+    var r = await fn(batch, Math.floor(i / size));
+    if (Array.isArray(r)) {
+      for (var j = 0; j < r.length; j++) results.push(r[j]);
+    } else if (r !== undefined) {
+      results.push(r);
+    }
+    __reportProgress({ done: Math.min(i + size, items.length), total: items.length });
+  }
+  return results;
+}
+
+/**
+ * Load fonts for a set of text nodes, deduplicating font requests.
+ * Figma's loadFontAsync is slow — calling it once per unique font
+ * instead of once per node saves significant time.
+ * @param {SceneNode[]} textNodes - Array of TEXT nodes
+ */
+async function __loadFontsForNodes(textNodes) {
+  var seen = {};
+  var toLoad = [];
+  for (var i = 0; i < textNodes.length; i++) {
+    var node = textNodes[i];
+    if (node.type !== 'TEXT') continue;
+    var len = node.characters.length;
+    if (len === 0) continue;
+    for (var ci = 0; ci < len; ci++) {
+      var font = node.getRangeFontName(ci, ci + 1);
+      if (font && font.family) {
+        var key = font.family + '::' + font.style;
+        if (!seen[key]) {
+          seen[key] = true;
+          toLoad.push(font);
+        }
+      }
+    }
+  }
+  for (var i = 0; i < toLoad.length; i++) {
+    await figma.loadFontAsync(toLoad[i]);
+  }
+  return { fontsLoaded: toLoad.length, nodesScanned: textNodes.length };
+}
+
+/**
+ * Find all nodes matching a predicate, with an optional page scope.
+ * Returns lightweight descriptors instead of full node references
+ * to keep response payloads small.
+ * @param {function} predicate - (node) => boolean
+ * @param {object}   [opts]
+ * @param {string}   [opts.pageId] - Limit search to a specific page
+ * @returns {{ id: string, name: string, type: string }[]}
+ */
+function __findNodes(predicate, opts) {
+  var root = figma.currentPage;
+  if (opts && opts.pageId) {
+    var pages = figma.root.children;
+    for (var i = 0; i < pages.length; i++) {
+      if (pages[i].id === opts.pageId) { root = pages[i]; break; }
+    }
+  }
+  var nodes = root.findAll(predicate);
+  var out = [];
+  for (var i = 0; i < nodes.length; i++) {
+    out.push({ id: nodes[i].id, name: nodes[i].name, type: nodes[i].type });
+  }
+  return out;
+}
+
+/**
+ * Set text content on multiple text nodes by ID.
+ * Loads all required fonts first (deduplicated), then sets characters.
+ * @param {{ id: string, characters: string }[]} entries
+ * @returns {{ updated: number, errors: string[] }}
+ */
+async function __batchSetText(entries) {
+  var textNodes = [];
+  var nodeMap = {};
+  for (var i = 0; i < entries.length; i++) {
+    var node = figma.getNodeById(entries[i].id);
+    if (node && node.type === 'TEXT') {
+      textNodes.push(node);
+      nodeMap[entries[i].id] = { node: node, chars: entries[i].characters };
+    }
+  }
+  await __loadFontsForNodes(textNodes);
+  var updated = 0;
+  var errors = [];
+  var ids = Object.keys(nodeMap);
+  for (var i = 0; i < ids.length; i++) {
+    try {
+      nodeMap[ids[i]].node.characters = nodeMap[ids[i]].chars;
+      updated++;
+    } catch (e) {
+      errors.push(ids[i] + ': ' + (e.message || String(e)));
+    }
+  }
+  return { updated: updated, errors: errors };
+}
+
 // Listen for requests from UI (e.g., component data requests, write operations)
 figma.ui.onmessage = async (msg) => {
 
@@ -194,6 +327,7 @@ figma.ui.onmessage = async (msg) => {
   // ============================================================================
   if (msg.type === 'EXECUTE_CODE') {
     try {
+      __currentRequestId = msg.requestId;
       console.log('🌉 [Desktop Bridge] Executing code, length:', msg.code.length);
 
       // Use eval with async IIFE wrapper instead of AsyncFunction constructor
@@ -285,8 +419,10 @@ figma.ui.onmessage = async (msg) => {
           fileKey: figma.fileKey || null
         }
       });
+      __currentRequestId = null;
 
     } catch (error) {
+      __currentRequestId = null;
       // Extract error message explicitly - don't rely on console.error serialization
       var errorName = error && error.name ? error.name : 'Error';
       var errorMsg = error && error.message ? error.message : String(error);

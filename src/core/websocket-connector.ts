@@ -72,7 +72,7 @@ export class WebSocketConnector implements IFigmaConnector {
     return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: 30000 }, 32000, fileKey);
   }
 
-  async executeCodeViaUI(code: string, timeoutMs = 5000): Promise<any> {
+  async executeCodeViaUI(code: string, timeoutMs = 15000): Promise<any> {
     return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: timeoutMs }, timeoutMs + 2000);
   }
 

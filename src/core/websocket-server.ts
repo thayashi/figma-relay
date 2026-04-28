@@ -236,6 +236,23 @@ export class FigmaWebSocketServer extends EventEmitter {
    * Handle incoming message from a plugin UI WebSocket connection
    */
   private handleMessage(message: any, ws: WebSocket): void {
+    // Progress heartbeat — reset the timeout timer but don't resolve the request.
+    // Each heartbeat grants another 15 s; if no progress arrives within that
+    // window the request times out as usual.
+    if (message.id && message.type === 'PROGRESS' && this.pendingRequests.has(message.id)) {
+      const pending = this.pendingRequests.get(message.id)!;
+      clearTimeout(pending.timeoutId);
+      const HEARTBEAT_WINDOW = 15000;
+      pending.timeoutId = setTimeout(() => {
+        if (this.pendingRequests.has(message.id)) {
+          this.pendingRequests.delete(message.id);
+          pending.reject(new Error(`WebSocket command ${pending.method} timed out (no progress for ${HEARTBEAT_WINDOW}ms)`));
+        }
+      }, HEARTBEAT_WINDOW);
+      logger.debug({ id: message.id, method: pending.method, progress: message.progress }, 'Progress heartbeat — timer reset');
+      return;
+    }
+
     // Response to a command we sent
     if (message.id && this.pendingRequests.has(message.id)) {
       const pending = this.pendingRequests.get(message.id)!;
@@ -540,6 +557,13 @@ export class FigmaWebSocketServer extends EventEmitter {
    */
   isStarted(): boolean {
     return this._isStarted;
+  }
+
+  /**
+   * Number of in-flight requests awaiting a Plugin response.
+   */
+  getPendingRequestCount(): number {
+    return this.pendingRequests.size;
   }
 
   /**
